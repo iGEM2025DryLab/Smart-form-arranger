@@ -3,114 +3,193 @@ from tkinter import ttk, filedialog, messagebox, colorchooser, font, simpledialo
 import pandas as pd
 import numpy as np
 from fuzzywuzzy import process
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 
-class FindHeaderDialog(tk.Toplevel):
+class ChartWindow(tk.Toplevel):
     """
-    一個用於查找行頭或列頭的獨立對話框。
+    一個用於顯示和編輯圖表的獨立視窗。
     """
-    def __init__(self, parent):
+    def __init__(self, parent, df, chart_type, x_col=None, y_col=None):
+        super().__init__(parent)
+        self.parent = parent
+        self.df = df.copy()
+        self.x_col = x_col
+        self.y_col = y_col
+        self.chart_type = chart_type
+
+        self.title(f"{chart_type.capitalize()} 圖表")
+        self.geometry("800x600")
+
+        self._create_menu()
+        self._draw_chart()
+
+    def _create_menu(self):
+        menubar = tk.Menu(self)
+        self.config(menu=menubar)
+        
+        edit_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="編輯", menu=edit_menu)
+        edit_menu.add_command(label="編輯標題...", command=self._edit_title)
+        if self.x_col:
+            edit_menu.add_command(label="編輯 X 軸名稱...", command=self._edit_xlabel)
+        if self.y_col:
+            edit_menu.add_command(label="編輯 Y 軸名稱...", command=self._edit_ylabel)
+
+    def _draw_chart(self):
+        """繪製所選類型的圖表。"""
+        # 根據圖表類型準備數據
+        cols_to_check = []
+        if self.x_col:
+            cols_to_check.append(self.x_col)
+            self.df[self.x_col] = pd.to_numeric(self.df[self.x_col], errors='coerce')
+        if self.y_col:
+            cols_to_check.append(self.y_col)
+            self.df[self.y_col] = pd.to_numeric(self.df[self.y_col], errors='coerce')
+        
+        plot_df = self.df.dropna(subset=cols_to_check)
+
+        if plot_df.empty:
+            messagebox.showerror("數據錯誤", "所選列沒有足夠的有效數值數據來繪製圖表。", parent=self)
+            self.destroy()
+            return
+
+        self.fig, self.ax = plt.subplots(figsize=(7, 5), dpi=100)
+
+        try:
+            if self.chart_type == 'scatter':
+                sns.scatterplot(data=plot_df, x=self.x_col, y=self.y_col, ax=self.ax)
+                self.ax.set_title(f"{self.y_col} vs. {self.x_col}")
+            elif self.chart_type == 'line':
+                sns.lineplot(data=plot_df, x=self.x_col, y=self.y_col, ax=self.ax)
+                self.ax.set_title(f"{self.y_col} vs. {self.x_col}")
+            elif self.chart_type == 'bar':
+                sns.barplot(data=plot_df, x=self.x_col, y=self.y_col, ax=self.ax)
+                self.ax.set_title(f"{self.y_col} vs. {self.x_col}")
+            elif self.chart_type == 'hist':
+                sns.histplot(data=plot_df, x=self.x_col, ax=self.ax, kde=True)
+                self.ax.set_title(f"{self.x_col} 的直方圖")
+            elif self.chart_type == 'box':
+                sns.boxplot(data=plot_df, y=self.y_col, ax=self.ax)
+                self.ax.set_title(f"{self.y_col} 的箱形圖")
+            elif self.chart_type == 'kde':
+                sns.kdeplot(data=plot_df, x=self.x_col, ax=self.ax, fill=True)
+                self.ax.set_title(f"{self.x_col} 的核密度估計圖")
+
+        except Exception as e:
+            messagebox.showerror("繪圖錯誤", f"無法生成圖表：\n{e}", parent=self)
+            self.destroy()
+            return
+
+        if self.x_col: self.ax.set_xlabel(self.x_col)
+        if self.y_col: self.ax.set_ylabel(self.y_col)
+        
+        plt.tight_layout()
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        toolbar = NavigationToolbar2Tk(self.canvas, self)
+        toolbar.update()
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+    def _redraw_canvas(self):
+        self.canvas.draw()
+
+    def _edit_title(self):
+        new_title = simpledialog.askstring("編輯標題", "輸入新的圖表標題:", parent=self)
+        if new_title is not None:
+            self.ax.set_title(new_title)
+            self._redraw_canvas()
+
+    def _edit_xlabel(self):
+        new_label = simpledialog.askstring("編輯 X 軸", "輸入新的 X 軸名稱:", parent=self)
+        if new_label is not None:
+            self.ax.set_xlabel(new_label)
+            self._redraw_canvas()
+
+    def _edit_ylabel(self):
+        new_label = simpledialog.askstring("編輯 Y 軸", "輸入新的 Y 軸名稱:", parent=self)
+        if new_label is not None:
+            self.ax.set_ylabel(new_label)
+            self._redraw_canvas()
+
+class VisualizationDialog(tk.Toplevel):
+    """
+    一個用於選擇圖表類型和數據列的對話框。
+    """
+    def __init__(self, parent, columns):
         super().__init__(parent)
         self.transient(parent)
         self.parent = parent
-        self.title("查找行頭/列頭")
-        self.geometry("400x150")
-        self.resizable(False, False)
-
-        self.last_find_index = -1
-        self.last_search_term = ""
-        self.last_search_type = ""
+        self.columns = columns
+        self.title("創建圖表")
+        self.geometry("350x200")
 
         self._create_widgets()
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _create_widgets(self):
         main_frame = ttk.Frame(self, padding=10)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # --- 查找內容 ---
-        ttk.Label(main_frame, text="查找內容:").grid(row=0, column=0, sticky="w", pady=2)
-        self.search_var = tk.StringVar()
-        self.search_entry = ttk.Entry(main_frame, textvariable=self.search_var)
-        self.search_entry.grid(row=0, column=1, columnspan=2, sticky="ew", pady=2)
-        self.search_entry.focus_set()
+        ttk.Label(main_frame, text="圖表類型:").grid(row=0, column=0, sticky="w", pady=5)
+        chart_types = ['scatter', 'line', 'bar', 'hist', 'box', 'kde']
+        self.chart_type_var = tk.StringVar(value='scatter')
+        self.chart_combo = ttk.Combobox(main_frame, textvariable=self.chart_type_var, values=chart_types, state='readonly')
+        self.chart_combo.grid(row=0, column=1, sticky="ew")
+        self.chart_combo.bind("<<ComboboxSelected>>", self.on_chart_type_select)
 
-        # --- 選項 ---
-        options_frame = ttk.Frame(main_frame)
-        options_frame.grid(row=1, column=1, columnspan=2, sticky="w", pady=5)
-        
-        self.search_type_var = tk.StringVar(value="column")
-        ttk.Radiobutton(options_frame, text="列頭", variable=self.search_type_var, value="column").pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Radiobutton(options_frame, text="行頭", variable=self.search_type_var, value="row").pack(side=tk.LEFT)
+        ttk.Label(main_frame, text="X 軸:").grid(row=1, column=0, sticky="w", pady=5)
+        self.x_col_var = tk.StringVar()
+        self.x_combo = ttk.Combobox(main_frame, textvariable=self.x_col_var, values=self.columns, state='readonly')
+        self.x_combo.grid(row=1, column=1, sticky="ew")
 
-        self.fuzzy_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(options_frame, text="模糊搜索", variable=self.fuzzy_var).pack(side=tk.LEFT, padx=(20, 0))
+        ttk.Label(main_frame, text="Y 軸:").grid(row=2, column=0, sticky="w", pady=5)
+        self.y_col_var = tk.StringVar()
+        self.y_combo = ttk.Combobox(main_frame, textvariable=self.y_col_var, values=self.columns, state='readonly')
+        self.y_combo.grid(row=2, column=1, sticky="ew")
 
-        # --- 按鈕 ---
-        button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=2, column=1, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(main_frame, text="生成圖表", command=self.generate_chart).grid(row=3, column=1, sticky="e", pady=20)
 
-        self.find_next_btn = ttk.Button(button_frame, text="查找下一個", command=self.find_next)
-        self.find_next_btn.pack()
+    def on_chart_type_select(self, event=None):
+        """根據選擇的圖表類型，啟用/禁用軸選擇。"""
+        chart_type = self.chart_type_var.get()
+        if chart_type in ['hist', 'kde']:
+            self.x_combo.config(state='readonly')
+            self.y_combo.config(state='disabled')
+            self.y_col_var.set('')
+        elif chart_type == 'box':
+            self.x_combo.config(state='disabled')
+            self.y_combo.config(state='readonly')
+            self.x_col_var.set('')
+        else: # scatter, line, bar
+            self.x_combo.config(state='readonly')
+            self.y_combo.config(state='readonly')
 
-    def find_next(self):
-        """查找下一個匹配的行頭或列頭。"""
-        term = self.search_var.get()
-        search_type = self.search_type_var.get()
-        if not term: return
+    def generate_chart(self):
+        x_col = self.x_col_var.get()
+        y_col = self.y_col_var.get()
+        chart_type = self.chart_type_var.get()
 
-        # 如果搜索條件改變，重置搜索
-        if term != self.last_search_term or search_type != self.last_search_type:
-            self.last_find_index = -1
-        
-        self.last_search_term = term
-        self.last_search_type = search_type
+        if chart_type in ['scatter', 'line', 'bar'] and (not x_col or not y_col):
+            messagebox.showwarning("選擇不完整", "此圖表類型需要同時選擇 X 軸和 Y 軸。", parent=self)
+            return
+        if chart_type in ['hist', 'kde'] and not x_col:
+            messagebox.showwarning("選擇不完整", "此圖表類型需要選擇 X 軸。", parent=self)
+            return
+        if chart_type == 'box' and not y_col:
+            messagebox.showwarning("選擇不完整", "此圖表類型需要選擇 Y 軸。", parent=self)
+            return
 
-        start_index = self.last_find_index + 1
-        
-        if search_type == 'column':
-            headers = list(self.parent.dataframe.columns)
-        else: # row
-            headers = list(self.parent.dataframe.index.map(str))
-
-        if start_index >= len(headers):
-            if messagebox.askyesno("查找完畢", "已搜索到結尾。是否從頭開始搜索？", parent=self):
-                start_index = 0
-            else:
-                return
-
-        # 遍歷查找
-        for i in range(start_index, len(headers)):
-            header = headers[i]
-            match = False
-            if self.fuzzy_var.get():
-                # 模糊搜索，設定一個相似度閾值，例如 70
-                if process.fuzz.ratio(term.lower(), header.lower()) > 70:
-                    match = True
-            else:
-                # 精確搜索 (包含即可)
-                if term.lower() in header.lower():
-                    match = True
-            
-            if match:
-                self.last_find_index = i
-                if search_type == 'column':
-                    self.parent.highlight_column(i)
-                else: # row
-                    self.parent.highlight_row(i)
-                return
-        
-        # 如果從中間找到結尾都沒找到
-        self.last_find_index = -1
-        messagebox.showinfo("未找到", f"找不到匹配 '{term}' 的標題。", parent=self)
-
-    def _on_close(self):
-        self.parent.find_header_dialog = None
         self.destroy()
+        self.parent.create_chart_window(chart_type, x_col or None, y_col or None)
 
 class PySheetApp(tk.Tk):
     """
     一個使用 Python 和 Tkinter 開發的專業版表格編輯器應用程式。
-    將查找與替換功能整合至主 UI。
+    所有查找功能均已整合至主 UI。
     """
     def __init__(self):
         super().__init__()
@@ -127,10 +206,12 @@ class PySheetApp(tk.Tk):
         self.undo_stack = []
         self.redo_stack = []
         
-        # --- 查找相關狀態 ---
         self.find_replace_frame_visible = False
-        self.last_find_coords = (-1, -1) # (row, col)
-        self.find_header_dialog = None
+        self.find_header_frame_visible = False
+        self.last_find_coords = (-1, -1)
+        self.last_header_find_index = -1
+        self.last_header_search_term = ""
+        self.last_header_search_type = ""
 
         self._create_widgets()
         self._create_menu()
@@ -156,7 +237,6 @@ class PySheetApp(tk.Tk):
         main_frame = ttk.Frame(self, padding="10 10 10 10")
         main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # --- 頂部框架：儲存格輸入框 ---
         top_frame = ttk.Frame(main_frame)
         top_frame.pack(fill=tk.X, pady=(0, 5))
         self.cell_pos_label = ttk.Label(top_frame, text="儲存格:", font=('Microsoft YaHei UI', 10))
@@ -167,10 +247,9 @@ class PySheetApp(tk.Tk):
         self.input_entry.bind("<Return>", self._update_cell_from_input)
         self.input_entry.bind("<FocusOut>", self._update_cell_from_input)
 
-        # --- 新增：查找與替換框架 (預設隱藏) ---
         self._create_find_replace_frame(main_frame)
+        self._create_find_header_frame(main_frame)
 
-        # --- 表格框架 ---
         tree_frame = ttk.Frame(main_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True)
         self.tree = ttk.Treeview(tree_frame, show='tree headings')
@@ -185,33 +264,35 @@ class PySheetApp(tk.Tk):
         self.tree.pack(side='left', fill='both', expand=True)
         self.tree.bind("<<TreeviewSelect>>", self._on_cell_select)
         self.tree.bind("<Button-3>", self._show_context_menu)
+        self.tree.bind("<Double-1>", self._on_header_double_click)
 
     def _create_find_replace_frame(self, parent):
-        """創建可收合的查找與替換 UI 面板。"""
         self.find_replace_frame = ttk.Frame(parent, padding=5)
-        
         ttk.Label(self.find_replace_frame, text="查找:").pack(side=tk.LEFT, padx=(0, 2))
         self.find_var = tk.StringVar()
-        find_entry = ttk.Entry(self.find_replace_frame, textvariable=self.find_var, width=20)
-        find_entry.pack(side=tk.LEFT, padx=(0, 5))
-
+        self.find_entry = ttk.Entry(self.find_replace_frame, textvariable=self.find_var, width=20)
+        self.find_entry.pack(side=tk.LEFT, padx=(0, 5))
         ttk.Label(self.find_replace_frame, text="替換為:").pack(side=tk.LEFT, padx=(5, 2))
         self.replace_var = tk.StringVar()
-        replace_entry = ttk.Entry(self.find_replace_frame, textvariable=self.replace_var, width=20)
-        replace_entry.pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Entry(self.find_replace_frame, textvariable=self.replace_var, width=20).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(self.find_replace_frame, text="下一個", command=self.find_next).pack(side=tk.LEFT, padx=2)
+        ttk.Button(self.find_replace_frame, text="替換", command=self.replace_cell).pack(side=tk.LEFT, padx=2)
+        ttk.Button(self.find_replace_frame, text="全部替換", command=self.replace_all).pack(side=tk.LEFT, padx=2)
+        ttk.Button(self.find_replace_frame, text="×", command=self.toggle_find_replace_frame, width=3).pack(side=tk.RIGHT, padx=(10, 0))
 
-        find_next_btn = ttk.Button(self.find_replace_frame, text="下一個", command=self.find_next)
-        find_next_btn.pack(side=tk.LEFT, padx=2)
-
-        replace_btn = ttk.Button(self.find_replace_frame, text="替換", command=self.replace_cell)
-        replace_btn.pack(side=tk.LEFT, padx=2)
-
-        replace_all_btn = ttk.Button(self.find_replace_frame, text="全部替換", command=self.replace_all)
-        replace_all_btn.pack(side=tk.LEFT, padx=2)
-        
-        # 使用一個更美觀的關閉按鈕
-        close_btn = ttk.Button(self.find_replace_frame, text="×", command=self.toggle_find_replace_frame, width=3)
-        close_btn.pack(side=tk.RIGHT, padx=(10, 0))
+    def _create_find_header_frame(self, parent):
+        self.find_header_frame = ttk.Frame(parent, padding=5)
+        ttk.Label(self.find_header_frame, text="查找標題:").pack(side=tk.LEFT, padx=(0, 2))
+        self.header_search_var = tk.StringVar()
+        self.header_search_entry = ttk.Entry(self.find_header_frame, textvariable=self.header_search_var, width=20)
+        self.header_search_entry.pack(side=tk.LEFT, padx=(0, 10))
+        self.header_search_type_var = tk.StringVar(value="column")
+        ttk.Radiobutton(self.find_header_frame, text="列頭", variable=self.header_search_type_var, value="column").pack(side=tk.LEFT)
+        ttk.Radiobutton(self.find_header_frame, text="行頭", variable=self.header_search_type_var, value="row").pack(side=tk.LEFT, padx=(0, 10))
+        self.header_fuzzy_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.find_header_frame, text="模糊搜索", variable=self.header_fuzzy_var).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(self.find_header_frame, text="查找下一個", command=self.find_next_header).pack(side=tk.LEFT, padx=2)
+        ttk.Button(self.find_header_frame, text="×", command=self.toggle_find_header_frame, width=3).pack(side=tk.RIGHT, padx=(10, 0))
 
     def _create_menu(self):
         menubar = tk.Menu(self)
@@ -239,7 +320,11 @@ class PySheetApp(tk.Tk):
         view_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="查看", menu=view_menu)
         view_menu.add_command(label="查找與替換...", command=self.toggle_find_replace_frame, accelerator="Ctrl+F")
-        view_menu.add_command(label="查找行頭/列頭...", command=self.open_find_header_dialog)
+        view_menu.add_command(label="查找行頭/列頭...", command=self.toggle_find_header_frame)
+
+        vis_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="可視化", menu=vis_menu)
+        vis_menu.add_command(label="繪製圖表...", command=self.open_visualization_dialog)
 
         settings_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="設置", menu=settings_menu)
@@ -282,42 +367,82 @@ class PySheetApp(tk.Tk):
         delete_menu.add_command(label="刪除行", command=self._delete_row)
         delete_menu.add_command(label="刪除列", command=self._delete_column)
 
-    # --- 查找與替換邏輯 ---
-    def open_find_header_dialog(self):
-        """打開查找行頭/列頭對話框。"""
-        if self.find_header_dialog is None or not self.find_header_dialog.winfo_exists():
-            self.find_header_dialog = FindHeaderDialog(self)
-        self.find_header_dialog.deiconify()
-        self.find_header_dialog.lift()
-        self.find_header_dialog.focus_set()
+    # --- 標題編輯 ---
+    def _on_header_double_click(self, event):
+        region = self.tree.identify_region(event.x, event.y)
+        if region != "heading":
+            return
+
+        col_id = self.tree.identify_column(event.x)
+        col_index = int(col_id.replace('#', '')) - 1
+        old_col_name = self.tree.heading(col_id, "text")
+
+        entry_edit = ttk.Entry(self.tree, style='Treeview.Heading')
+        entry_edit.place(x=0, y=0, anchor='nw', relwidth=1, relheight=1)
+        
+        bbox = self.tree.bbox(None, column=col_id)
+        entry_edit.place(x=bbox[0], y=bbox[1], width=bbox[2], height=bbox[3])
+        
+        entry_edit.insert(0, old_col_name)
+        entry_edit.focus_force()
+        entry_edit.select_range(0, tk.END)
+
+        entry_edit.bind("<Return>", lambda e: self._save_header_edit(entry_edit, col_index, old_col_name))
+        entry_edit.bind("<FocusOut>", lambda e: self._save_header_edit(entry_edit, col_index, old_col_name))
+
+    def _save_header_edit(self, entry, col_index, old_col_name):
+        new_col_name = entry.get()
+        entry.destroy()
+
+        if new_col_name and new_col_name != old_col_name:
+            if new_col_name in self.dataframe.columns:
+                messagebox.showwarning("名稱重複", f"欄位名稱 '{new_col_name}' 已存在。")
+                return
+            
+            self._add_to_undo(('rename_column', old_col_name, new_col_name))
+            self.dataframe.rename(columns={old_col_name: new_col_name}, inplace=True)
+            self._load_data_to_treeview()
+
+    # --- 可視化與查找邏輯 ---
+    def open_visualization_dialog(self):
+        if self.dataframe.empty:
+            messagebox.showwarning("無數據", "請先加載或創建數據。")
+            return
+        VisualizationDialog(self, list(self.dataframe.columns))
+
+    def create_chart_window(self, chart_type, x_col, y_col):
+        ChartWindow(self, self.dataframe, chart_type, x_col, y_col)
 
     def toggle_find_replace_frame(self):
-        """顯示或隱藏查找與替換面板。"""
+        if self.find_header_frame_visible: self.toggle_find_header_frame()
         if self.find_replace_frame_visible:
             self.find_replace_frame.pack_forget()
         else:
-            # 將其放置在頂部輸入框和表格之間
             self.find_replace_frame.pack(fill=tk.X, pady=(0, 5), before=self.tree.master)
-            # 將焦點設置到查找輸入框
-            self.find_replace_frame.winfo_children()[1].focus_set()
+            self.find_entry.focus_set()
         self.find_replace_frame_visible = not self.find_replace_frame_visible
 
+    def toggle_find_header_frame(self):
+        if self.find_replace_frame_visible: self.toggle_find_replace_frame()
+        if self.find_header_frame_visible:
+            self.find_header_frame.pack_forget()
+        else:
+            self.find_header_frame.pack(fill=tk.X, pady=(0, 5), before=self.tree.master)
+            self.header_search_entry.focus_set()
+        self.find_header_frame_visible = not self.find_header_frame_visible
+
     def find_next(self):
-        """從當前位置開始查找下一個匹配項。"""
         find_term = self.find_var.get()
         if not find_term: return
-
         df = self.dataframe
         start_row, start_col = self.last_find_coords
         start_col += 1
-
         for i in range(start_row if start_row != -1 else 0, len(df)):
             for j in range(start_col if i == start_row else 0, len(df.columns)):
                 cell_value = str(df.iat[i, j])
                 if find_term in cell_value:
                     self.highlight_cell(i, j)
                     return
-        
         if self.last_find_coords != (-1, -1):
             if messagebox.askyesno("查找完畢", "已搜索到文件結尾。是否從頭開始搜索？", parent=self):
                 self.last_find_coords = (-1, -1)
@@ -325,35 +450,56 @@ class PySheetApp(tk.Tk):
         else:
             messagebox.showinfo("未找到", f"找不到 '{find_term}'。", parent=self)
 
+    def find_next_header(self):
+        term = self.header_search_var.get()
+        search_type = self.header_search_type_var.get()
+        if not term: return
+        if term != self.last_header_search_term or search_type != self.last_header_search_type:
+            self.last_header_find_index = -1
+        self.last_header_search_term = term
+        self.last_header_search_type = search_type
+        start_index = self.last_header_find_index + 1
+        headers = list(self.dataframe.columns) if search_type == 'column' else list(self.dataframe.index.map(str))
+        if start_index >= len(headers):
+            if messagebox.askyesno("查找完畢", "已搜索到結尾。是否從頭開始搜索？", parent=self):
+                start_index = 0
+            else:
+                return
+        for i in range(start_index, len(headers)):
+            header = headers[i]
+            match = False
+            if self.header_fuzzy_var.get():
+                if process.fuzz.ratio(term.lower(), header.lower()) > 70: match = True
+            else:
+                if term.lower() in header.lower(): match = True
+            if match:
+                self.last_header_find_index = i
+                if search_type == 'column': self.highlight_column(i)
+                else: self.highlight_row(i)
+                return
+        self.last_header_find_index = -1
+        messagebox.showinfo("未找到", f"找不到匹配 '{term}' 的標題。", parent=self)
+
     def replace_cell(self):
-        """替換當前選中的匹配項並查找下一個。"""
         selected_items = self.tree.selection()
         if not selected_items: self.find_next(); return
-        
         row_id_str, row_idx, col_idx = selected_items[0], *self.last_find_coords
-        
         if self.dataframe.index.get_loc(int(row_id_str)) != row_idx or col_idx == -1:
             self.find_next(); return
-
         find_term, replace_term = self.find_var.get(), self.replace_var.get()
         col_name = self.dataframe.columns[col_idx]
         old_value = str(self.dataframe.iat[row_idx, col_idx])
-        
         new_value = old_value.replace(find_term, replace_term, 1)
-        
         self._add_to_undo(('edit', row_id_str, col_name, old_value))
         self._apply_change(row_id_str, col_name, new_value)
         self.find_next()
 
     def replace_all(self):
-        """替換所有匹配項。"""
         find_term, replace_term = self.find_var.get(), self.replace_var.get()
         if not find_term: return
-
         original_df = self.dataframe.copy()
         new_df = self.dataframe.astype(str).applymap(lambda x: x.replace(find_term, replace_term))
         found_count = (self.dataframe.astype(str) != new_df.astype(str)).sum().sum()
-
         if found_count > 0:
             self._add_to_undo(('replace_all', original_df))
             self.dataframe = new_df
@@ -363,7 +509,6 @@ class PySheetApp(tk.Tk):
             messagebox.showinfo("未找到", f"找不到 '{find_term}'。", parent=self)
 
     def highlight_cell(self, row_idx, col_idx):
-        """在 Treeview 中高亮顯示指定的單元格。"""
         self.last_find_coords = (row_idx, col_idx)
         row_id_str = str(self.dataframe.index[row_idx])
         self.tree.selection_set(row_id_str)
@@ -371,9 +516,8 @@ class PySheetApp(tk.Tk):
         self.tree.see(row_id_str)
 
     def highlight_column(self, col_idx):
-        """高亮顯示一列（通過滾動並選擇第一個單元格）。"""
         col_id = f"#{col_idx + 1}"
-        self.tree.see(col_id)
+        self.tree.xview_moveto(col_idx / len(self.dataframe.columns))
         all_rows = self.tree.get_children()
         if all_rows:
             first_row_id = all_rows[0]
@@ -383,7 +527,6 @@ class PySheetApp(tk.Tk):
             self.cell_pos_label.config(text=f"欄: {col_name}")
 
     def highlight_row(self, row_idx):
-        """高亮顯示一行。"""
         row_id_str = str(self.dataframe.index[row_idx])
         self.tree.selection_set(row_id_str)
         self.tree.focus(row_id_str)
@@ -428,6 +571,11 @@ class PySheetApp(tk.Tk):
             self.redo_stack.append(('replace_all', self.dataframe.copy()))
             self.dataframe = old_dataframe
             self._load_data_to_treeview()
+        elif action_type == 'rename_column':
+            _, old_name, new_name = action
+            self.redo_stack.append(('rename_column', new_name, old_name))
+            self.dataframe.rename(columns={new_name: old_name}, inplace=True)
+            self._load_data_to_treeview()
         self._update_edit_menu_state()
 
     def redo_action(self, event=None):
@@ -457,6 +605,11 @@ class PySheetApp(tk.Tk):
             _, new_dataframe = action
             self.undo_stack.append(('replace_all', self.dataframe.copy()))
             self.dataframe = new_dataframe
+            self._load_data_to_treeview()
+        elif action_type == 'rename_column':
+            _, new_name, old_name = action
+            self.undo_stack.append(('rename_column', old_name, new_name))
+            self.dataframe.rename(columns={old_name: new_name}, inplace=True)
             self._load_data_to_treeview()
         self._update_edit_menu_state()
 
@@ -624,10 +777,10 @@ class PySheetApp(tk.Tk):
             self.input_var.set(str(value)); self.cell_pos_label.config(text=f"儲存格: {column_name}[{item_id}]")
         except (KeyError, IndexError, ValueError):
              self.input_var.set(""); self.cell_pos_label.config(text=f"儲存格:")
-    def show_about(self): messagebox.showinfo("關於 PySheet", "Python 表格編輯器 (PySheet) v5.3\n\n一個使用 Tkinter 和 Pandas 製作的全功能表格應用程式。\n新增查找行/列頭功能，支援模糊搜索。\n開發者：Gemini")
+    def show_about(self): messagebox.showinfo("關於 PySheet", "Python 表格編輯器 (PySheet) v5.6\n\n一個使用 Tkinter 和 Pandas 製作的全功能表格應用程式。\n新增更多圖表類型並支援欄位標題編輯。\n開發者：Gemini")
 
 if __name__ == "__main__":
-    # 為了讓模糊搜索能運作，需要安裝 fuzzywuzzy 和 python-Levenshtein
-    # pip install fuzzywuzzy python-Levenshtein
+    # 為了讓所有功能能運作，需要安裝以下函式庫
+    # pip install pandas openpyxl fuzzywuzzy python-Levenshtein matplotlib seaborn
     app = PySheetApp()
     app.mainloop()
