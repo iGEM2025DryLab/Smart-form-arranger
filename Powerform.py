@@ -6,6 +6,7 @@ from fuzzywuzzy import process
 import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+import re
 
 class ChartWindow(tk.Toplevel):
     """
@@ -186,6 +187,258 @@ class VisualizationDialog(tk.Toplevel):
         self.destroy()
         self.parent.create_chart_window(chart_type, x_col or None, y_col or None)
 
+class PatternFillDialog(tk.Toplevel):
+    """
+    一個用於範式填充功能的獨立對話框。
+    """
+    def __init__(self, parent, start_value, start_index, start_column, all_indices, all_columns):
+        super().__init__(parent)
+        self.transient(parent)
+        self.parent = parent
+        
+        self.start_value = str(start_value)
+        self.start_index = start_index
+        self.start_column = start_column
+        self.all_indices = all_indices
+        self.all_columns = all_columns
+        
+        self.title("範式填充")
+        self.geometry("800x600")
+        self.resizable(True, True)
+
+        self._create_widgets()
+
+    def _create_widgets(self):
+        dialog_main_frame = ttk.Frame(self)
+        dialog_main_frame.pack(fill=tk.BOTH, expand=True)
+
+        button_frame = ttk.Frame(dialog_main_frame, padding=(10, 10, 10, 10))
+        button_frame.pack(fill=tk.X, side=tk.BOTTOM)
+        ttk.Button(button_frame, text="應用", command=self._apply_fill).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(button_frame, text="取消", command=self.destroy).pack(side=tk.RIGHT)
+        ttk.Button(button_frame, text="預覽", command=self._update_preview).pack(side=tk.RIGHT, padx=5)
+
+        main_pane = ttk.PanedWindow(dialog_main_frame, orient=tk.HORIZONTAL)
+        main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
+
+        controls_frame = ttk.Frame(main_pane, padding=10)
+        main_pane.add(controls_frame, weight=2) 
+
+        preview_container = ttk.Frame(main_pane, padding=10)
+        main_pane.add(preview_container, weight=3)
+
+        self._populate_controls_frame(controls_frame)
+        self._populate_preview_frame(preview_container)
+
+
+    def _populate_controls_frame(self, parent_frame):
+        common_frame = ttk.LabelFrame(parent_frame, text="通用設置", padding=10)
+        common_frame.pack(fill=tk.X, pady=(0, 5), side=tk.TOP)
+
+        ttk.Label(common_frame, text="當前起始值:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.start_value_label = ttk.Label(common_frame, text=f"'{self.start_value}'", font=('Microsoft YaHei UI', 10, 'bold'))
+        self.start_value_label.grid(row=0, column=1, sticky="w", padx=5, pady=5)
+
+        ttk.Label(common_frame, text="填充方向:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.fill_direction_var = tk.StringVar(value="column")
+        dir_frame = ttk.Frame(common_frame)
+        ttk.Radiobutton(dir_frame, text="填充列 (向下)", variable=self.fill_direction_var, value="column").pack(side=tk.LEFT)
+        ttk.Radiobutton(dir_frame, text="填充行 (向右)", variable=self.fill_direction_var, value="row").pack(side=tk.LEFT, padx=10)
+        dir_frame.grid(row=1, column=1, sticky="w")
+
+        ttk.Label(common_frame, text="填充數量:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        self.fill_count_var = tk.StringVar(value="10")
+        ttk.Entry(common_frame, textvariable=self.fill_count_var, width=10).grid(row=2, column=1, sticky="w", padx=5)
+
+        manual_frame = ttk.LabelFrame(parent_frame, text="手動選擇起始單元格", padding=10)
+        manual_frame.pack(fill=tk.X, pady=5, side=tk.TOP)
+        
+        ttk.Label(manual_frame, text="行頭:").grid(row=0, column=0, padx=5, pady=5)
+        self.row_var = tk.StringVar(value=str(self.start_index))
+        self.row_combo = ttk.Combobox(manual_frame, textvariable=self.row_var, values=self.all_indices)
+        self.row_combo.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+
+        ttk.Label(manual_frame, text="列頭:").grid(row=1, column=0, padx=5, pady=5)
+        self.col_var = tk.StringVar(value=self.start_column)
+        self.col_combo = ttk.Combobox(manual_frame, textvariable=self.col_var, values=self.all_columns)
+        self.col_combo.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        
+        ttk.Button(manual_frame, text="更新", command=self._update_start_value_from_selection).grid(row=2, column=1, padx=5, pady=10, sticky="e")
+        
+        manual_frame.grid_columnconfigure(1, weight=1)
+
+        self.notebook = ttk.Notebook(parent_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True, pady=10, side=tk.TOP)
+
+        self.copy_frame = ttk.Frame(self.notebook, padding=10)
+        self.sequence_frame = ttk.Frame(self.notebook, padding=10)
+        self.cycle_frame = ttk.Frame(self.notebook, padding=10)
+
+        self.notebook.add(self.copy_frame, text="複製")
+        self.notebook.add(self.sequence_frame, text="遞推")
+        self.notebook.add(self.cycle_frame, text="循環")
+
+        self._populate_pattern_frames()
+
+    def _populate_preview_frame(self, parent_frame):
+        preview_frame = ttk.LabelFrame(parent_frame, text="預覽", padding=10)
+        preview_frame.pack(fill=tk.BOTH, expand=True)
+        
+        tree_container = ttk.Frame(preview_frame)
+        tree_container.pack(fill=tk.BOTH, expand=True)
+        
+        self.preview_tree = ttk.Treeview(tree_container, show="headings", height=5)
+        
+        vsb = ttk.Scrollbar(tree_container, orient="vertical", command=self.preview_tree.yview)
+        hsb = ttk.Scrollbar(tree_container, orient="horizontal", command=self.preview_tree.xview)
+        self.preview_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        self.preview_tree.grid(row=0, column=0, sticky='nsew')
+        vsb.grid(row=0, column=1, sticky='ns')
+        hsb.grid(row=1, column=0, sticky='ew')
+
+        tree_container.grid_rowconfigure(0, weight=1)
+        tree_container.grid_columnconfigure(0, weight=1)
+
+    def _populate_pattern_frames(self):
+        ttk.Label(self.copy_frame, text="將起始值複製到指定數量的單元格中。").pack()
+
+        ttk.Label(self.sequence_frame, text="步長:").grid(row=0, column=0, sticky="w", pady=5)
+        self.step_var = tk.StringVar(value="1")
+        ttk.Entry(self.sequence_frame, textvariable=self.step_var, width=10).grid(row=0, column=1, sticky="w")
+
+        ttk.Label(self.cycle_frame, text="步長:").grid(row=0, column=0, sticky="w", pady=5)
+        self.cycle_step_var = tk.StringVar(value="1")
+        ttk.Entry(self.cycle_frame, textvariable=self.cycle_step_var, width=10).grid(row=0, column=1, sticky="w")
+        
+        ttk.Label(self.cycle_frame, text="下限:").grid(row=1, column=0, sticky="w", pady=5)
+        self.lower_bound_var = tk.StringVar(value="1")
+        ttk.Entry(self.cycle_frame, textvariable=self.lower_bound_var, width=10).grid(row=1, column=1, sticky="w")
+
+        ttk.Label(self.cycle_frame, text="上限:").grid(row=2, column=0, sticky="w", pady=5)
+        self.upper_bound_var = tk.StringVar(value="10")
+        ttk.Entry(self.cycle_frame, textvariable=self.upper_bound_var, width=10).grid(row=2, column=1, sticky="w")
+
+    def _update_start_value_from_selection(self):
+        """從手動選擇的單元格更新起始值。"""
+        selected_row_str = self.row_var.get()
+        selected_col = self.col_var.get()
+
+        if not selected_row_str or not selected_col:
+            messagebox.showwarning("選擇不完整", "請選擇行和列。", parent=self)
+            return
+        
+        try:
+            index_dtype = self.parent.dataframe.index.dtype
+            df_index = pd.Series([selected_row_str]).astype(index_dtype).iloc[0]
+            
+            new_start_value = self.parent.dataframe.loc[df_index, selected_col]
+            self.start_value = str(new_start_value)
+            self.start_value_label.config(text=f"'{self.start_value}'")
+            messagebox.showinfo("更新成功", f"起始值已更新為 '{self.start_value}'。", parent=self)
+        except (KeyError, IndexError, ValueError, TypeError):
+            messagebox.showerror("錯誤", "無法找到所選的單元格。", parent=self)
+
+    def _generate_fill_data(self):
+        """根據用戶選擇的模式和參數生成填充數據列表。"""
+        try:
+            fill_count = int(self.fill_count_var.get())
+            if fill_count <= 0:
+                messagebox.showerror("輸入錯誤", "填充數量必須是正整數。", parent=self)
+                return None
+        except ValueError:
+            messagebox.showerror("輸入錯誤", "填充數量必須是有效的整數。", parent=self)
+            return None
+
+        active_tab_text = self.notebook.tab(self.notebook.select(), "text")
+        
+        match = re.match(r'^(.*?)(\d+)$', self.start_value)
+        if match:
+            prefix, num_str = match.groups()
+            current_num = int(num_str)
+        else:
+            prefix, current_num = self.start_value, None
+            if active_tab_text != "複製":
+                try:
+                    current_num = int(self.start_value)
+                    prefix = ""
+                except (ValueError, TypeError):
+                    messagebox.showerror("格式錯誤", f"起始值 '{self.start_value}' 無法用於遞推或循環模式。\n請使用純數字或 '文字+數字' 格式。", parent=self)
+                    return None
+
+        result_list = []
+        if active_tab_text == "複製":
+            result_list = [self.start_value] * fill_count
+        
+        elif active_tab_text == "遞推":
+            try:
+                step = int(self.step_var.get())
+            except ValueError:
+                messagebox.showerror("輸入錯誤", "步長必須是有效的整數。", parent=self)
+                return None
+            
+            for _ in range(fill_count):
+                result_list.append(f"{prefix}{current_num}")
+                current_num += step
+
+        elif active_tab_text == "循環":
+            try:
+                step = int(self.cycle_step_var.get())
+                lower = int(self.lower_bound_var.get())
+                upper = int(self.upper_bound_var.get())
+            except ValueError:
+                messagebox.showerror("輸入錯誤", "步長和循環範圍必須是有效的整數。", parent=self)
+                return None
+
+            if lower >= upper:
+                messagebox.showerror("範圍錯誤", "循環範圍的上限必須大於下限。", parent=self)
+                return None
+            if current_num is None or not (lower <= current_num <= upper):
+                messagebox.showerror("範圍錯誤", f"起始值 '{current_num}' 不在循環範圍 [{lower}, {upper}] 內。", parent=self)
+                return None
+            if (upper - lower + 1) <= abs(step):
+                messagebox.showerror("步長錯誤", "循環範圍的區間必須大於步長的絕對值。", parent=self)
+                return None
+
+            for _ in range(fill_count):
+                result_list.append(f"{prefix}{current_num}")
+                current_num += step
+                if current_num > upper:
+                    current_num = lower + (current_num - upper - 1) % (upper - lower + 1)
+                elif current_num < lower:
+                    current_num = upper - (lower - current_num - 1) % (upper - lower + 1)
+
+        return result_list
+
+    def _update_preview(self):
+        """更新預覽表格。"""
+        for item in self.preview_tree.get_children():
+            self.preview_tree.delete(item)
+
+        data = self._generate_fill_data()
+        if data is None: return
+
+        direction = self.fill_direction_var.get()
+        if direction == 'column':
+            self.preview_tree['columns'] = ('填充值',)
+            self.preview_tree.heading('填充值', text='填充值')
+            for val in data:
+                self.preview_tree.insert('', 'end', values=(val,))
+        else: # row
+            self.preview_tree['columns'] = [f'單元格 {i+1}' for i in range(len(data))]
+            for i, col_name in enumerate(self.preview_tree['columns']):
+                self.preview_tree.heading(col_name, text=col_name)
+            self.preview_tree.insert('', 'end', values=data)
+
+    def _apply_fill(self):
+        """應用填充並關閉對話框。"""
+        data = self._generate_fill_data()
+        if data is None: return
+        
+        direction = self.fill_direction_var.get()
+        self.parent.apply_pattern_fill(direction, data)
+        self.destroy()
+
 class PySheetApp(tk.Tk):
     """
     一個使用 Python 和 Tkinter 開發的專業版表格編輯器應用程式。
@@ -212,6 +465,8 @@ class PySheetApp(tk.Tk):
         self.last_header_find_index = -1
         self.last_header_search_term = ""
         self.last_header_search_type = ""
+        
+        self.active_column_id = None
 
         self._create_widgets()
         self._create_menu()
@@ -223,7 +478,7 @@ class PySheetApp(tk.Tk):
         self.entry_bg = '#ffffff'
         self.tree_bg_even = '#ffffff'
         self.tree_bg_odd = '#f5f5f5'
-        self.select_bg = '#0078d7'
+        self.select_bg = '#d9e8f9' 
         self.configure(bg=self.bg_color)
         self.style.configure('.', background=self.bg_color, foreground=self.fg_color, font=('Microsoft YaHei UI', 10))
         self.style.configure('TFrame', background=self.bg_color)
@@ -231,7 +486,9 @@ class PySheetApp(tk.Tk):
         self.style.configure('TEntry', fieldbackground=self.entry_bg)
         self.style.configure('Treeview.Heading', font=('Microsoft YaHei UI', 10, 'bold'), padding=5)
         self.style.configure('Treeview', rowheight=25, fieldbackground=self.tree_bg_even)
-        self.style.map('Treeview', background=[('selected', self.select_bg)], foreground=[('selected', '#ffffff')])
+        self.style.map('Treeview', 
+                       background=[('selected', self.select_bg)],
+                       foreground=[('selected', self.fg_color)])
 
     def _create_widgets(self):
         main_frame = ttk.Frame(self, padding="10 10 10 10")
@@ -262,9 +519,15 @@ class PySheetApp(tk.Tk):
         vsb.pack(side='right', fill='y')
         hsb.pack(side='bottom', fill='x')
         self.tree.pack(side='left', fill='both', expand=True)
-        self.tree.bind("<<TreeviewSelect>>", self._on_cell_select)
+        
+        self.tree.bind("<<TreeviewSelect>>", self._on_row_select)
+        self.tree.bind("<Button-1>", self._on_cell_click)
         self.tree.bind("<Button-3>", self._show_context_menu)
-        self.tree.bind("<Double-1>", self._on_header_double_click)
+        self.tree.bind("<Double-1>", self._on_double_click)
+        self.tree.bind("<Up>", self._on_key_navigate)
+        self.tree.bind("<Down>", self._on_key_navigate)
+        self.tree.bind("<Left>", self._on_key_navigate)
+        self.tree.bind("<Right>", self._on_key_navigate)
 
     def _create_find_replace_frame(self, parent):
         self.find_replace_frame = ttk.Frame(parent, padding=5)
@@ -306,6 +569,8 @@ class PySheetApp(tk.Tk):
         file_menu.add_command(label="保存", command=self.save_file, accelerator="Ctrl+S")
         file_menu.add_command(label="另存為...", command=self.save_file_as, accelerator="Ctrl+Shift+S")
         file_menu.add_separator()
+        file_menu.add_command(label="導出為圖片...", command=self.export_as_image)
+        file_menu.add_separator()
         file_menu.add_command(label="退出", command=self.quit)
         
         self.edit_menu = tk.Menu(menubar, tearoff=0)
@@ -316,6 +581,9 @@ class PySheetApp(tk.Tk):
         self.edit_menu.add_command(label="剪下", command=self._cut_cell, accelerator="Ctrl+X")
         self.edit_menu.add_command(label="複製", command=self._copy_cell, accelerator="Ctrl+C")
         self.edit_menu.add_command(label="貼上", command=self._paste_cell, accelerator="Ctrl+V")
+        self.edit_menu.add_separator()
+        self.edit_menu.add_command(label="範式填充...", command=self.open_pattern_fill_dialog)
+        self.edit_menu.add_command(label="擴展表格...", command=self.open_extend_dialog)
         
         view_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="查看", menu=view_menu)
@@ -366,41 +634,91 @@ class PySheetApp(tk.Tk):
         self.context_menu.add_cascade(label="刪除", menu=delete_menu)
         delete_menu.add_command(label="刪除行", command=self._delete_row)
         delete_menu.add_command(label="刪除列", command=self._delete_column)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="重命名行頭...", command=self._rename_row_header)
 
     # --- 標題編輯 ---
-    def _on_header_double_click(self, event):
+    def _on_double_click(self, event):
+        """根據雙擊的位置，分派到標題編輯或儲存格編輯。"""
         region = self.tree.identify_region(event.x, event.y)
-        if region != "heading":
-            return
+        if region == "heading":
+            self._edit_column_header_popup(event)
+        elif region == "cell":
+            self._edit_cell_popup(event)
 
+    def _edit_column_header_popup(self, event):
+        """處理雙擊欄位標題以進行重命名的操作。"""
         col_id = self.tree.identify_column(event.x)
-        col_index = int(col_id.replace('#', '')) - 1
+        if not col_id: return
         old_col_name = self.tree.heading(col_id, "text")
 
-        entry_edit = ttk.Entry(self.tree, style='Treeview.Heading')
-        entry_edit.place(x=0, y=0, anchor='nw', relwidth=1, relheight=1)
-        
-        bbox = self.tree.bbox(None, column=col_id)
-        entry_edit.place(x=bbox[0], y=bbox[1], width=bbox[2], height=bbox[3])
-        
-        entry_edit.insert(0, old_col_name)
-        entry_edit.focus_force()
-        entry_edit.select_range(0, tk.END)
-
-        entry_edit.bind("<Return>", lambda e: self._save_header_edit(entry_edit, col_index, old_col_name))
-        entry_edit.bind("<FocusOut>", lambda e: self._save_header_edit(entry_edit, col_index, old_col_name))
-
-    def _save_header_edit(self, entry, col_index, old_col_name):
-        new_col_name = entry.get()
-        entry.destroy()
+        new_col_name = simpledialog.askstring("重命名列頭",
+                                              f"為列 '{old_col_name}' 輸入新名稱:",
+                                              initialvalue=old_col_name,
+                                              parent=self)
 
         if new_col_name and new_col_name != old_col_name:
             if new_col_name in self.dataframe.columns:
-                messagebox.showwarning("名稱重複", f"欄位名稱 '{new_col_name}' 已存在。")
+                messagebox.showwarning("名稱重複", f"欄位名稱 '{new_col_name}' 已存在。", parent=self)
                 return
             
-            self._add_to_undo(('rename_column', old_col_name, new_col_name))
+            self._add_to_undo(('重命名列頭', self.dataframe.copy()))
             self.dataframe.rename(columns={old_col_name: new_col_name}, inplace=True)
+            self._load_data_to_treeview()
+
+    def _edit_cell_popup(self, event):
+        """處理雙擊儲存格以彈出對話框進行編輯的操作。"""
+        item_id = self.tree.identify_row(event.y)
+        column_id = self.tree.identify_column(event.x)
+        if not item_id or not column_id: return
+
+        try:
+            col_index = int(column_id.replace('#', '')) - 1
+            if col_index < 0: return
+            column_name = self.tree['columns'][col_index]
+            
+            index_dtype = self.dataframe.index.dtype
+            df_index = pd.Series([item_id]).astype(index_dtype).iloc[0]
+
+            old_value = self.dataframe.loc[df_index, column_name]
+        except (KeyError, IndexError, ValueError, TypeError):
+            return
+
+        new_value = simpledialog.askstring("編輯儲存格",
+                                           f"為儲存格 {column_name}[{df_index}] 輸入新值:",
+                                           initialvalue=old_value,
+                                           parent=self)
+
+        if new_value is not None and new_value != str(old_value):
+            self._add_to_undo(('編輯儲存格', self.dataframe.copy()))
+            self._apply_change(df_index, column_name, new_value)
+
+    def _rename_row_header(self):
+        """處理通過右鍵選單重命名行頭的邏輯。"""
+        if not self.context_menu_row_id: return
+        
+        index_dtype = self.dataframe.index.dtype
+        try:
+            old_row_name = pd.Series([self.context_menu_row_id]).astype(index_dtype).iloc[0]
+        except (ValueError, TypeError):
+            old_row_name = self.context_menu_row_id
+
+        if old_row_name not in self.dataframe.index: return
+            
+        new_row_name_str = simpledialog.askstring("重命名行頭", f"為行 '{old_row_name}' 輸入新名稱:", parent=self)
+        
+        if new_row_name_str and new_row_name_str != str(old_row_name):
+            try:
+                new_row_name = pd.Series([new_row_name_str]).astype(index_dtype).iloc[0]
+            except (ValueError, TypeError):
+                new_row_name = new_row_name_str
+
+            if new_row_name in self.dataframe.index:
+                messagebox.showwarning("名稱重複", f"行名 '{new_row_name}' 已存在。", parent=self)
+                return
+            
+            self._add_to_undo(('重命名行頭', self.dataframe.copy()))
+            self.dataframe.rename(index={old_row_name: new_row_name}, inplace=True)
             self._load_data_to_treeview()
 
     # --- 可視化與查找邏輯 ---
@@ -412,6 +730,96 @@ class PySheetApp(tk.Tk):
 
     def create_chart_window(self, chart_type, x_col, y_col):
         ChartWindow(self, self.dataframe, chart_type, x_col, y_col)
+
+    def open_pattern_fill_dialog(self):
+        """打開範式填充對話框。"""
+        selected_items = self.tree.selection()
+        if not selected_items:
+            messagebox.showwarning("未選擇", "請先選擇一個起始單元格。")
+            return
+        
+        item_id = selected_items[0]
+        if not self.active_column_id:
+            messagebox.showwarning("未選擇", "無法確定起始列。請點擊一個單元格。")
+            return
+            
+        try:
+            col_index = int(self.active_column_id.replace('#', '')) - 1
+            column_name = self.tree['columns'][col_index]
+            index_dtype = self.dataframe.index.dtype
+            df_index = pd.Series([item_id]).astype(index_dtype).iloc[0]
+            start_value = self.dataframe.loc[df_index, column_name]
+            
+            all_columns = list(self.dataframe.columns)
+            all_indices = list(self.dataframe.index.map(str))
+
+            PatternFillDialog(self, start_value, df_index, column_name, all_indices, all_columns)
+        except (KeyError, IndexError, ValueError, TypeError):
+            messagebox.showerror("錯誤", "無法獲取所選單元格的數據。")
+            return
+
+    def apply_pattern_fill(self, direction, data):
+        """應用範式填充的結果到 DataFrame，並在需要時自動擴展。"""
+        selected_items = self.tree.selection()
+        if not selected_items or not self.active_column_id: return
+        
+        item_id = selected_items[0]
+        try:
+            col_index = int(self.active_column_id.replace('#', '')) - 1
+            start_col_name = self.tree['columns'][col_index]
+            start_df_index = pd.Series([item_id]).astype(self.dataframe.index.dtype).iloc[0]
+            start_row_pos = self.dataframe.index.get_loc(start_df_index)
+            start_col_pos = self.dataframe.columns.get_loc(start_col_name)
+        except (KeyError, IndexError, ValueError, TypeError):
+            return
+        
+        self._add_to_undo(('範式填充', self.dataframe.copy()))
+
+        if direction == 'column':
+            required_rows = start_row_pos + len(data)
+            if required_rows > len(self.dataframe):
+                rows_to_add = required_rows - len(self.dataframe)
+                new_rows = pd.DataFrame("", index=np.arange(rows_to_add), columns=self.dataframe.columns)
+                self.dataframe = pd.concat([self.dataframe, new_rows], ignore_index=True)
+            self.dataframe.iloc[start_row_pos:start_row_pos + len(data), start_col_pos] = data
+        else: # row
+            required_cols = start_col_pos + len(data)
+            if required_cols > len(self.dataframe.columns):
+                cols_to_add = required_cols - len(self.dataframe.columns)
+                for i in range(cols_to_add):
+                    new_col_name = "Unnamed"
+                    c = 1
+                    while f"{new_col_name}_{c}" in self.dataframe.columns:
+                        c += 1
+                    new_col_name = f"{new_col_name}_{c}"
+                    self.dataframe[new_col_name] = ""
+            self.dataframe.iloc[start_row_pos, start_col_pos:start_col_pos + len(data)] = data
+
+        self._load_data_to_treeview()
+
+    def open_extend_dialog(self):
+        ExtendDialog(self)
+
+    def execute_extend(self, count, direction):
+        if self.dataframe.empty:
+            messagebox.showwarning("無數據", "請先創建或打開一個表格。")
+            return
+
+        self._add_to_undo(('擴展表格', self.dataframe.copy()))
+
+        if direction == 'down':
+            new_rows = pd.DataFrame("", index=np.arange(count), columns=self.dataframe.columns)
+            self.dataframe = pd.concat([self.dataframe, new_rows], ignore_index=True)
+        else: # right
+            for i in range(count):
+                new_col_name = "Unnamed"
+                c = 1
+                while f"{new_col_name}_{c}" in self.dataframe.columns:
+                    c += 1
+                new_col_name = f"{new_col_name}_{c}"
+                self.dataframe[new_col_name] = ""
+        
+        self._load_data_to_treeview()
 
     def toggle_find_replace_frame(self):
         if self.find_header_frame_visible: self.toggle_find_header_frame()
@@ -469,9 +877,9 @@ class PySheetApp(tk.Tk):
             header = headers[i]
             match = False
             if self.header_fuzzy_var.get():
-                if process.fuzz.ratio(term.lower(), header.lower()) > 70: match = True
+                if process.fuzz.ratio(term.lower(), str(header).lower()) > 70: match = True
             else:
-                if term.lower() in header.lower(): match = True
+                if term.lower() in str(header).lower(): match = True
             if match:
                 self.last_header_find_index = i
                 if search_type == 'column': self.highlight_column(i)
@@ -490,22 +898,22 @@ class PySheetApp(tk.Tk):
         col_name = self.dataframe.columns[col_idx]
         old_value = str(self.dataframe.iat[row_idx, col_idx])
         new_value = old_value.replace(find_term, replace_term, 1)
-        self._add_to_undo(('edit', row_id_str, col_name, old_value))
+        self._add_to_undo(('edit', self.dataframe.copy()))
         self._apply_change(row_id_str, col_name, new_value)
         self.find_next()
 
     def replace_all(self):
         find_term, replace_term = self.find_var.get(), self.replace_var.get()
         if not find_term: return
-        original_df = self.dataframe.copy()
+        self._add_to_undo(('replace_all', self.dataframe.copy()))
         new_df = self.dataframe.astype(str).applymap(lambda x: x.replace(find_term, replace_term))
         found_count = (self.dataframe.astype(str) != new_df.astype(str)).sum().sum()
         if found_count > 0:
-            self._add_to_undo(('replace_all', original_df))
             self.dataframe = new_df
             self._load_data_to_treeview()
             messagebox.showinfo("完成", f"已完成 {found_count} 處替換。", parent=self)
         else:
+            self.undo_stack.pop() # No change, so remove undo record
             messagebox.showinfo("未找到", f"找不到 '{find_term}'。", parent=self)
 
     def highlight_cell(self, row_idx, col_idx):
@@ -546,71 +954,18 @@ class PySheetApp(tk.Tk):
 
     def undo_action(self, event=None):
         if not self.undo_stack: return
-        action = self.undo_stack.pop()
-        action_type = action[0]
-        if action_type == 'edit':
-            _, row_id, col_name, old_value = action
-            current_value = self.dataframe.loc[int(row_id), col_name]
-            self.redo_stack.append(('edit', row_id, col_name, current_value))
-            self._apply_change(row_id, col_name, old_value)
-        elif action_type == 'delete_row':
-            _, index, deleted_data = action
-            part1 = self.dataframe.iloc[:index]
-            part2 = self.dataframe.iloc[index:]
-            self.dataframe = pd.concat([part1, deleted_data.to_frame().T, part2]).reset_index(drop=True)
-            self.redo_stack.append(('insert_row', index))
-            self._load_data_to_treeview()
-        elif action_type == 'insert_row':
-            _, index = action
-            deleted_data = self.dataframe.loc[index].copy()
-            self.dataframe = self.dataframe.drop(index).reset_index(drop=True)
-            self.redo_stack.append(('delete_row', index, deleted_data))
-            self._load_data_to_treeview()
-        elif action_type == 'replace_all':
-            _, old_dataframe = action
-            self.redo_stack.append(('replace_all', self.dataframe.copy()))
-            self.dataframe = old_dataframe
-            self._load_data_to_treeview()
-        elif action_type == 'rename_column':
-            _, old_name, new_name = action
-            self.redo_stack.append(('rename_column', new_name, old_name))
-            self.dataframe.rename(columns={new_name: old_name}, inplace=True)
-            self._load_data_to_treeview()
+        description, old_dataframe = self.undo_stack.pop()
+        self.redo_stack.append((description, self.dataframe.copy()))
+        self.dataframe = old_dataframe
+        self._load_data_to_treeview()
         self._update_edit_menu_state()
 
     def redo_action(self, event=None):
         if not self.redo_stack: return
-        action = self.redo_stack.pop()
-        action_type = action[0]
-        if action_type == 'edit':
-            _, row_id, col_name, new_value = action
-            old_value = self.dataframe.loc[int(row_id), col_name]
-            self.undo_stack.append(('edit', row_id, col_name, old_value))
-            self._apply_change(row_id, col_name, new_value)
-        elif action_type == 'delete_row':
-            _, index, _ = action
-            deleted_data = self.dataframe.loc[index].copy()
-            self.dataframe = self.dataframe.drop(index).reset_index(drop=True)
-            self.undo_stack.append(('insert_row', index, deleted_data))
-            self._load_data_to_treeview()
-        elif action_type == 'insert_row':
-            _, index = action
-            new_row = pd.DataFrame([[""] * len(self.dataframe.columns)], columns=self.dataframe.columns)
-            part1 = self.dataframe.iloc[:index]
-            part2 = self.dataframe.iloc[index:]
-            self.dataframe = pd.concat([part1, new_row, part2]).reset_index(drop=True)
-            self.undo_stack.append(('delete_row', index))
-            self._load_data_to_treeview()
-        elif action_type == 'replace_all':
-            _, new_dataframe = action
-            self.undo_stack.append(('replace_all', self.dataframe.copy()))
-            self.dataframe = new_dataframe
-            self._load_data_to_treeview()
-        elif action_type == 'rename_column':
-            _, new_name, old_name = action
-            self.undo_stack.append(('rename_column', old_name, new_name))
-            self.dataframe.rename(columns={old_name: new_name}, inplace=True)
-            self._load_data_to_treeview()
+        description, new_dataframe = self.redo_stack.pop()
+        self.undo_stack.append((description, self.dataframe.copy()))
+        self.dataframe = new_dataframe
+        self._load_data_to_treeview()
         self._update_edit_menu_state()
 
     def _show_context_menu(self, event):
@@ -621,6 +976,7 @@ class PySheetApp(tk.Tk):
         paste_state = "normal" if self.clipboard_data is not None else "disabled"
         self.context_menu.entryconfig("貼上", state=paste_state)
         self.context_menu.post(event.x_root, event.y_root)
+
     def _get_context_cell(self):
         if not self.context_menu_row_id or not self.context_menu_col_id: return None, None
         row_id = self.context_menu_row_id
@@ -630,77 +986,128 @@ class PySheetApp(tk.Tk):
             col_name = self.dataframe.columns[col_index]
             return row_id, col_name
         except (ValueError, IndexError): return None, None
+
     def _copy_cell(self, event=None):
         row_id, col_name = self._get_context_cell()
         if row_id is None: return
-        self.clipboard_data = self.dataframe.loc[int(row_id), col_name]
+        df_index = pd.Series([row_id]).astype(self.dataframe.index.dtype).iloc[0]
+        self.clipboard_data = self.dataframe.loc[df_index, col_name]
         self._update_edit_menu_state()
+
     def _cut_cell(self, event=None):
         row_id, col_name = self._get_context_cell()
         if row_id is None: return
         self._copy_cell()
-        self._add_to_undo(('edit', row_id, col_name, self.clipboard_data))
-        self._apply_change(row_id, col_name, "")
+        df_index = pd.Series([row_id]).astype(self.dataframe.index.dtype).iloc[0]
+        self._add_to_undo(('剪下', self.dataframe.copy()))
+        self._apply_change(df_index, col_name, "")
+
     def _paste_cell(self, event=None):
         if self.clipboard_data is None: return
         row_id, col_name = self._get_context_cell()
         if row_id is None: return
-        old_value = self.dataframe.loc[int(row_id), col_name]
-        self._add_to_undo(('edit', row_id, col_name, old_value))
-        self._apply_change(row_id, col_name, self.clipboard_data)
+        df_index = pd.Series([row_id]).astype(self.dataframe.index.dtype).iloc[0]
+        self._add_to_undo(('貼上', self.dataframe.copy()))
+        self._apply_change(df_index, col_name, self.clipboard_data)
+
     def _delete_row(self):
         if not self.context_menu_row_id: return
-        row_index = self.dataframe.index.get_loc(int(self.context_menu_row_id))
-        deleted_data = self.dataframe.loc[row_index].copy()
-        self.dataframe = self.dataframe.drop(row_index).reset_index(drop=True)
-        self._add_to_undo(('delete_row', row_index, deleted_data))
+        self._add_to_undo(('刪除行', self.dataframe.copy()))
+        df_index = pd.Series([self.context_menu_row_id]).astype(self.dataframe.index.dtype).iloc[0]
+        self.dataframe = self.dataframe.drop(df_index)
         self._load_data_to_treeview()
+
     def _insert_row(self, above=True):
+        """
+        插入一個新行。此函數經過修改以解決索引重複和行號異常的問題。
+        """
         if not self.context_menu_row_id: return
-        row_index = self.dataframe.index.get_loc(int(self.context_menu_row_id))
-        insert_pos = row_index if above else row_index + 1
-        new_row = pd.DataFrame([[""] * len(self.dataframe.columns)], columns=self.dataframe.columns)
+        
+        self._add_to_undo(('插入行', self.dataframe.copy()))
+        
+        try:
+            # 根據 DataFrame 索引找到整數位置
+            df_index = pd.Series([self.context_menu_row_id]).astype(self.dataframe.index.dtype).iloc[0]
+            row_pos = self.dataframe.index.get_loc(df_index)
+        except (KeyError, ValueError):
+            # 如果在 DataFrame 中找不到索引（例如，它是一個尚未在 df 索引中的新行），
+            # 則回退到 treeview 中的位置。
+            try:
+                row_pos = self.tree.index(self.context_menu_row_id)
+            except tk.TclError:
+                # 如果所有方法都失敗，則在選擇的末尾插入
+                selected_items = self.tree.selection()
+                if not selected_items: return
+                row_pos = self.tree.index(selected_items[0])
+
+        insert_pos = row_pos if above else row_pos + 1
+
+        # 創建要插入的新行
+        new_row_df = pd.DataFrame([[""] * len(self.dataframe.columns)], columns=self.dataframe.columns)
+
+        # 分割 DataFrame 並與新行連接
         part1 = self.dataframe.iloc[:insert_pos]
         part2 = self.dataframe.iloc[insert_pos:]
-        self.dataframe = pd.concat([part1, new_row, part2]).reset_index(drop=True)
-        self._add_to_undo(('insert_row', insert_pos))
+        
+        # 重建 DataFrame。使用 ignore_index=True 至關重要。
+        # 它會創建一個新的、乾淨的、連續的 RangeIndex (0, 1, 2, ...)。
+        # 這直接解決了兩個問題：
+        # 1. 通過保證索引的唯一性，防止了 `_tkinter.TclError: Item ... already exists` 錯誤。
+        # 2. 解決了用戶在插入後遇到的“單元格名稱異常”（行標題）問題，
+        #    因為索引將保持為一個乾淨的序列。
+        # 注意：這將用標準的整數索引替換任何自定義的行索引（例如，從加載的文件中讀取的）。
+        # 這是為了穩定性而做出的權衡。
+        self.dataframe = pd.concat([part1, new_row_df, part2], ignore_index=True)
+
         self._load_data_to_treeview()
+
     def _delete_column(self):
         _, col_name = self._get_context_cell()
         if col_name is None: return
         if messagebox.askyesno("確認刪除", f"您確定要刪除 '{col_name}' 這一整列嗎？此操作目前無法復原。"):
+            self._add_to_undo(('刪除列', self.dataframe.copy()))
             self.dataframe.drop(columns=[col_name], inplace=True)
             self._load_data_to_treeview()
+
     def _insert_column(self, left=True):
         _, col_name = self._get_context_cell()
         if col_name is None: return
-        new_col_name = simpledialog.askstring("新列名稱", "請輸入新列的名稱：")
-        if not new_col_name or new_col_name in self.dataframe.columns:
-            messagebox.showwarning("無效名稱", "列名稱不可為空或與現有列重複。")
-            return
+        self._add_to_undo(('插入列', self.dataframe.copy()))
+        new_col_name = "Unnamed"
+        c = 1
+        while f"{new_col_name}_{c}" in self.dataframe.columns:
+            c += 1
+        new_col_name = f"{new_col_name}_{c}"
         col_index = self.dataframe.columns.get_loc(col_name)
         insert_pos = col_index if left else col_index + 1
         self.dataframe.insert(insert_pos, new_col_name, "")
         self._load_data_to_treeview()
-    def _apply_change(self, row_id, col_name, value):
-        self.dataframe.loc[int(row_id), col_name] = value
-        updated_row_values = [str(v) for v in self.dataframe.loc[int(row_id)].values]
-        self.tree.item(str(row_id), values=updated_row_values)
+
+    def _apply_change(self, df_index, col_name, value):
+        self.dataframe.loc[df_index, col_name] = value
+        item_id = str(df_index)
+        updated_row_values = [str(v) for v in self.dataframe.loc[df_index].values]
+        try:
+            self.tree.item(item_id, values=updated_row_values)
+        except tk.TclError:
+            pass # 如果視圖不同步，Item 可能不存在，_load_data 將修復它
+
     def _update_cell_from_input(self, event=None):
         selected_items = self.tree.selection()
         if not selected_items: return
         item_id = selected_items[0]
         try:
-            label_text = self.cell_pos_label.cget("text")
-            if "儲存格:" in label_text: column_name = label_text.split(":")[1].strip().split("[")[0]
+            if "儲存格:" in self.cell_pos_label.cget("text") and self.active_column_id:
+                column_name = self.tree.heading(self.active_column_id, "text")
             else: return
-        except IndexError: return
+            index_dtype = self.dataframe.index.dtype
+            df_index = pd.Series([item_id]).astype(index_dtype).iloc[0]
+        except (IndexError, KeyError, ValueError, TypeError): return
         new_value = self.input_var.get()
-        old_value = self.dataframe.loc[int(item_id), column_name]
-        if str(old_value) == str(new_value): return
-        self._add_to_undo(('edit', item_id, column_name, old_value))
-        self._apply_change(item_id, column_name, new_value)
+        self._add_to_undo(('edit', self.dataframe.copy()))
+        self._apply_change(df_index, column_name, new_value)
         self.tree.focus_set()
+
     def _load_data_to_treeview(self):
         self._clear_treeview()
         if self.dataframe.empty: return
@@ -713,71 +1120,259 @@ class PySheetApp(tk.Tk):
             max_width = max([default_font.measure(str(x)) for x in content_series]) if not content_series.empty else 0
             col_width = max(header_width, max_width) + 30
             self.tree.column(col, width=col_width, minwidth=60, anchor=tk.W)
-        for index, row in self.dataframe.iterrows():
+        for i, (index, row) in enumerate(self.dataframe.iterrows()):
             values = [str(v) for v in row.values]
-            tag = 'evenrow' if index % 2 == 0 else 'oddrow'
+            tag = 'evenrow' if i % 2 == 0 else 'oddrow'
             self.tree.insert("", "end", values=values, iid=str(index), tags=(tag,))
+
     def new_file(self, event=None):
         self.dataframe = pd.DataFrame([['', ''], ['', '']], columns=['欄位A', '欄位B'])
         self.file_path = None
         self.title("Python 表格編輯器 (PySheet) - 未命名")
         self._load_data_to_treeview()
         self.undo_stack.clear(); self.redo_stack.clear(); self._update_edit_menu_state()
+
     def open_file(self, event=None):
-        path = filedialog.askopenfilename(filetypes=[("支援的檔案", "*.xlsx *.csv *.json"), ("Excel 檔案", "*.xlsx"), ("CSV 檔案", "*.csv"), ("JSON 檔案", "*.json"), ("所有檔案", "*.*")])
+        path = filedialog.askopenfilename(filetypes=[("支援的檔案", "*.xlsx *.csv *.json *.md"), ("Excel 檔案", "*.xlsx"), ("CSV 檔案", "*.csv"), ("JSON 檔案", "*.json"), ("Markdown 檔案", "*.md"), ("所有檔案", "*.*")])
         if not path: return
         self.file_path = path
         try:
-            if path.endswith('.xlsx'): self.dataframe = pd.read_excel(path)
-            elif path.endswith('.csv'): self.dataframe = pd.read_csv(path)
+            if path.endswith('.xlsx'): self.dataframe = pd.read_excel(path, index_col=0)
+            elif path.endswith('.csv'): self.dataframe = pd.read_csv(path, index_col=0)
             elif path.endswith('.json'):
                 try: self.dataframe = pd.read_json(path, orient='records')
                 except ValueError:
                     with open(path, 'r', encoding='utf-8') as f: data = pd.read_json(f); self.dataframe = pd.json_normalize(data)
+            elif path.endswith('.md'):
+                self.dataframe = self._read_markdown_table(path)
+
             for col in self.dataframe.columns: self.dataframe[col] = self.dataframe[col].astype(str)
             self.title(f"Python 表格編輯器 - {path.split('/')[-1]}")
             self._load_data_to_treeview()
             self.undo_stack.clear(); self.redo_stack.clear(); self._update_edit_menu_state()
         except Exception as e: messagebox.showerror("開啟檔案錯誤", f"無法讀取檔案：\n{e}"); self.dataframe = pd.DataFrame(); self._clear_treeview()
+
+    def _read_markdown_table(self, path):
+        """從 Markdown 文件中解析第一個表格。"""
+        with open(path, 'r', encoding='utf-8') as f:
+            lines = [line.strip() for line in f if line.strip()]
+        
+        if len(lines) < 2: raise ValueError("Markdown 文件不包含有效的表格。")
+
+        separator_index = -1
+        for i, line in enumerate(lines):
+            if re.match(r'^[|: -]+$', line) and '---' in line:
+                separator_index = i
+                break
+        
+        if separator_index == -1 or separator_index == 0:
+            raise ValueError("找不到 Markdown 表格的標頭分隔符。")
+
+        header_line = lines[separator_index - 1]
+        columns = [h.strip() for h in header_line.split('|') if h.strip()]
+        
+        data = []
+        for line in lines[separator_index + 1:]:
+            if re.match(r'^[|: -]+$', line) or not line.startswith('|'): break
+            row = [d.strip() for d in line.split('|')]
+            if len(row) > 1 and row[0] == '' and row[-1] == '':
+                row = row[1:-1]
+            if len(row) == len(columns):
+                data.append(row)
+
+        if not data: return pd.DataFrame(columns=columns)
+        
+        df = pd.DataFrame(data, columns=columns)
+        df.set_index(df.columns[0], inplace=True)
+        return df
+
     def save_file(self, event=None):
         if self.file_path: self._execute_save(self.file_path)
         else: self.save_file_as()
+
     def save_file_as(self, event=None):
-        path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel 檔案", "*.xlsx"), ("CSV 檔案", "*.csv"), ("JSON 檔案", "*.json")])
+        path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel 檔案", "*.xlsx"), ("CSV 檔案", "*.csv"), ("JSON 檔案", "*.json"), ("Markdown 檔案", "*.md")])
         if path: self._execute_save(path)
+
     def _execute_save(self, path):
         if self.dataframe.empty: messagebox.showwarning("無資料", "表格中沒有資料可以儲存。"); return
         try:
             df_to_save = self.dataframe.copy()
             for col in df_to_save.columns: df_to_save[col] = pd.to_numeric(df_to_save[col], errors='ignore')
-            if path.endswith('.xlsx'): df_to_save.to_excel(path, index=False)
-            elif path.endswith('.csv'): df_to_save.to_csv(path, index=False, encoding='utf-8-sig')
-            elif path.endswith('.json'): df_to_save.to_json(path, orient='records', indent=4, force_ascii=False)
+            if path.endswith('.xlsx'): df_to_save.to_excel(path, index=True)
+            elif path.endswith('.csv'): df_to_save.to_csv(path, index=True, encoding='utf-8-sig')
+            elif path.endswith('.json'): df_to_save.to_json(path, orient='index', indent=4)
+            elif path.endswith('.md'):
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(df_to_save.to_markdown())
             self.file_path = path; self.title(f"Python 表格編輯器 - {path.split('/')[-1]}"); messagebox.showinfo("儲存成功", f"檔案已成功儲存至：\n{path}")
         except Exception as e: messagebox.showerror("儲存檔案錯誤", f"無法儲存檔案：\n{e}")
+    
+    def export_as_image(self):
+        """將當前表格導出為圖片。"""
+        if self.dataframe.empty:
+            messagebox.showwarning("無數據", "沒有數據可以導出。")
+            return
+            
+        dpi = simpledialog.askinteger("設置 DPI", "請輸入導出圖片的 DPI (例如 150):", initialvalue=150, minvalue=50, maxvalue=600)
+        if not dpi: return
+
+        path = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG 圖片", "*.png")])
+        if not path: return
+        
+        try:
+            fig, ax = plt.subplots(figsize=(12, 8)) 
+            ax.axis('tight')
+            ax.axis('off')
+            
+            table = ax.table(cellText=self.dataframe.values,
+                             colLabels=self.dataframe.columns,
+                             rowLabels=self.dataframe.index,
+                             cellLoc='center', 
+                             loc='center')
+            table.auto_set_font_size(False)
+            table.set_fontsize(10)
+            table.scale(1.2, 1.2)
+            
+            fig.savefig(path, dpi=dpi, bbox_inches='tight', pad_inches=0.5)
+            plt.close(fig) 
+            
+            messagebox.showinfo("導出成功", f"表格已成功導出為圖片：\n{path}")
+        except Exception as e:
+            messagebox.showerror("導出錯誤", f"無法導出圖片：\n{e}")
+
     def _change_background_color(self):
         color_data = colorchooser.askcolor(title="選擇背景顏色", initialcolor=self.bg_color)
         if not color_data: return
         new_color = color_data[1]; self.bg_color = new_color; self.configure(bg=self.bg_color)
         self.style.configure('.', background=self.bg_color); self.style.configure('TFrame', background=self.bg_color); self.style.configure('TLabel', background=self.bg_color)
+
     def _change_resolution(self, resolution): self.geometry(resolution.split(" ")[0])
+
     def _clear_treeview(self): self.tree.delete(*self.tree.get_children()); self.tree["columns"] = ()
-    def _on_cell_select(self, event):
+    
+    def _on_row_select(self, event):
+        """僅在行選擇變化時更新活動儲存格。"""
         selected_items = self.tree.selection()
         if not selected_items: return
         item_id = selected_items[0]
-        x = self.winfo_pointerx() - self.tree.winfo_rootx()
-        column_id = self.tree.identify_column(x)
-        if not column_id: return
+        if not self.active_column_id:
+            try:
+                self.active_column_id = "#1" 
+            except IndexError:
+                return 
+        self._update_active_cell_display(item_id, self.active_column_id)
+
+    def _on_cell_click(self, event):
+        """處理儲存格的單次點擊事件。"""
+        item_id = self.tree.identify_row(event.y)
+        column_id = self.tree.identify_column(event.x)
+        if not item_id or not column_id: return
+        
+        if self.tree.selection() != (item_id,):
+            self.tree.selection_set(item_id)
+
+        self._update_active_cell_display(item_id, column_id)
+        self.input_entry.focus_set()
+        self.input_entry.select_range(0, tk.END)
+
+    def _on_key_navigate(self, event):
+        """處理方向鍵導航。"""
+        selected_items = self.tree.selection()
+        if not selected_items: return
+        
+        current_item = selected_items[0]
+        
+        if not self.active_column_id:
+            self.active_column_id = "#1"
+
+        if event.keysym == 'Up':
+            next_item = self.tree.prev(current_item)
+            if next_item:
+                self.tree.selection_set(next_item)
+                self.tree.see(next_item)
+        elif event.keysym == 'Down':
+            next_item = self.tree.next(current_item)
+            if next_item:
+                self.tree.selection_set(next_item)
+                self.tree.see(next_item)
+        elif event.keysym in ['Left', 'Right']:
+            cols = list(self.tree['columns'])
+            try:
+                current_col_index = cols.index(self.tree.heading(self.active_column_id, 'text'))
+            except (ValueError, tk.TclError):
+                current_col_index = 0
+
+            if event.keysym == 'Left':
+                next_col_index = max(0, current_col_index - 1)
+            else: # Right
+                next_col_index = min(len(cols) - 1, current_col_index + 1)
+            
+            new_col_id = f"#{next_col_index + 1}"
+            self._update_active_cell_display(current_item, new_col_id)
+        
+        return "break" 
+
+    def _update_active_cell_display(self, item_id, column_id):
+        """更新頂部輸入框和標籤以反映當前的活動儲存格。"""
+        self.active_column_id = column_id
         try:
-            column_index = int(column_id.replace('#', '')) - 1
-            if column_index < 0 or column_index >= len(self.tree["columns"]): return
-            column_name = self.tree["columns"][column_index]
-            value = self.dataframe.loc[int(item_id), column_name]
-            self.input_var.set(str(value)); self.cell_pos_label.config(text=f"儲存格: {column_name}[{item_id}]")
-        except (KeyError, IndexError, ValueError):
-             self.input_var.set(""); self.cell_pos_label.config(text=f"儲存格:")
-    def show_about(self): messagebox.showinfo("關於 PySheet", "Python 表格編輯器 (PySheet) v5.6\n\n一個使用 Tkinter 和 Pandas 製作的全功能表格應用程式。\n新增更多圖表類型並支援欄位標題編輯。\n開發者：Gemini")
+            col_index = int(column_id.replace('#', '')) - 1
+            if col_index < 0: return
+            column_name = self.tree['columns'][col_index]
+            
+            index_dtype = self.dataframe.index.dtype
+            df_index = pd.Series([item_id]).astype(index_dtype).iloc[0]
+
+            value = self.dataframe.loc[df_index, column_name]
+            self.input_var.set(str(value))
+            self.cell_pos_label.config(text=f"儲存格: {column_name}[{df_index}]")
+        except (KeyError, IndexError, ValueError, TypeError):
+             self.input_var.set("")
+             self.cell_pos_label.config(text="儲存格:")
+
+    def show_about(self): messagebox.showinfo("關於 PySheet", "Python 表格編輯器 (PySheet) v6.2\n\n一個使用 Tkinter 和 Pandas 製作的全功能表格應用程式。\n修正了範式填充對話框的佈局。\n開發者：Gemini")
+
+class ExtendDialog(tk.Toplevel):
+    """一個用於擴展表格的對話框。"""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.transient(parent)
+        self.parent = parent
+        self.title("擴展表格")
+        self.geometry("300x150")
+        self._create_widgets()
+
+    def _create_widgets(self):
+        main_frame = ttk.Frame(self, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(main_frame, text="數量:").grid(row=0, column=0, sticky="w", pady=5)
+        self.count_var = tk.StringVar(value="10")
+        ttk.Entry(main_frame, textvariable=self.count_var, width=10).grid(row=0, column=1, sticky="w")
+
+        ttk.Label(main_frame, text="方向:").grid(row=1, column=0, sticky="w", pady=5)
+        self.direction_var = tk.StringVar(value="down")
+        dir_frame = ttk.Frame(main_frame)
+        ttk.Radiobutton(dir_frame, text="向下 (增加行)", variable=self.direction_var, value="down").pack(side=tk.LEFT)
+        ttk.Radiobutton(dir_frame, text="向右 (增加列)", variable=self.direction_var, value="right").pack(side=tk.LEFT, padx=10)
+        dir_frame.grid(row=1, column=1, sticky="w")
+
+        ttk.Button(main_frame, text="擴展", command=self.apply_extend).grid(row=2, column=1, sticky="e", pady=20)
+
+    def apply_extend(self):
+        try:
+            count = int(self.count_var.get())
+            if count <= 0:
+                messagebox.showerror("輸入錯誤", "數量必須是正整數。", parent=self)
+                return
+        except ValueError:
+            messagebox.showerror("輸入錯誤", "數量必須是有效的整數。", parent=self)
+            return
+        
+        direction = self.direction_var.get()
+        self.parent.execute_extend(count, direction)
+        self.destroy()
 
 if __name__ == "__main__":
     # 為了讓所有功能能運作，需要安裝以下函式庫
